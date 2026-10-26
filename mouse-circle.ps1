@@ -2,12 +2,14 @@
 $Radius = 100       # px
 $StepsPerCircle = 120
 $IntervalMs = 20
+$MaxDurationMinutes = 60
 
 $ErrorActionPreference = 'Stop'
 
-if ($Radius -le 0 -or $StepsPerCircle -lt 3 -or $IntervalMs -lt 1) {
-    throw '設定値は Radius > 0、StepsPerCircle >= 3、IntervalMs >= 1 にしてください。'
+if ($Radius -le 0 -or $StepsPerCircle -lt 3 -or $IntervalMs -lt 1 -or $MaxDurationMinutes -le 0) {
+    throw '設定値は Radius > 0、StepsPerCircle >= 3、IntervalMs >= 1、MaxDurationMinutes > 0 にしてください。'
 }
+$MaxDurationMs = [long]$MaxDurationMinutes * 60000
 
 # Add-Type は同じ PowerShell セッションで再実行しても型を再定義しない。
 if (-not ('MouseCircle.Native' -as [type])) {
@@ -148,8 +150,8 @@ namespace MouseCircle
             return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
         }
 
-        // 返り値: 1=Esc, 2=左クリック, 3=右クリック, 4=物理移動, 5=WM_QUIT
-        public static int Run(int radius, int steps, int intervalMs)
+        // 返り値: 1=Esc, 2=左クリック, 3=右クリック, 4=物理移動, 5=WM_QUIT, 6=時間制限
+        public static int Run(int radius, int steps, int intervalMs, long maxDurationMs)
         {
             POINT center;
             if (!GetCursorPos(out center)) throw new Win32Exception(Marshal.GetLastWin32Error(), "GetCursorPos failed");
@@ -187,9 +189,14 @@ namespace MouseCircle
                     if (Volatile.Read(ref stopReason) != 0) break;
 
                     long now = timer.ElapsedMilliseconds;
+                    if (now >= maxDurationMs)
+                    {
+                        Interlocked.CompareExchange(ref stopReason, 6, 0);
+                        break;
+                    }
                     if (now < nextTick)
                     {
-                        uint wait = (uint)Math.Min(nextTick - now, int.MaxValue);
+                        uint wait = (uint)Math.Min(Math.Min(nextTick - now, maxDurationMs - now), int.MaxValue);
                         uint result = MsgWaitForMultipleObjectsEx(0, IntPtr.Zero, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
                         if (result == 0xFFFFFFFF) throw new Win32Exception(Marshal.GetLastWin32Error(), "Message wait failed");
                         continue;
@@ -229,16 +236,17 @@ namespace MouseCircle
 }
 
 Write-Host "円運動を開始します（半径 ${Radius}px、${StepsPerCircle}分割、間隔 ${IntervalMs}ms）。"
-Write-Host '停止方法: Esc / 左クリック / 右クリック / 物理的なマウス移動'
+Write-Host "停止方法: Esc / 左クリック / 右クリック / 物理的なマウス移動 / ${MaxDurationMinutes}分経過"
 
 try {
-    $reason = [MouseCircle.Native]::Run($Radius, $StepsPerCircle, $IntervalMs)
+    $reason = [MouseCircle.Native]::Run($Radius, $StepsPerCircle, $IntervalMs, $MaxDurationMs)
     $description = switch ($reason) {
         1 { 'Escキー' }
         2 { '左クリック' }
         3 { '右クリック' }
         4 { '物理的なマウス移動' }
         5 { 'メッセージループの終了' }
+        6 { '時間制限' }
         default { "不明 ($reason)" }
     }
     Write-Host "停止理由: $description"
